@@ -294,8 +294,8 @@ This proves the bridge solution **works completely without osspd** — a true gr
 
 ```
 github-repo/
-├── README.md              # This document
-├── README_en.md           # English version
+├── README.md              # This document (English, primary)
+├── README_zh.md           # Chinese version
 ├── AppRun                 # Application launcher
 ├── oss-bridge/            # Bridge component source
 │   ├── shim_oss.c         # 32-bit shim

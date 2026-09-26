@@ -1,6 +1,6 @@
 # Winamp3 Linux Bridge - 让经典播放器在现代 Linux 上重生
 
-> **Project Overview**: [English version](README_en.md)
+> **项目总览**：[English version](README.md)
 
 > **项目简介**: 使用 AI 辅助技术（腾讯 WorkBuddy），帮助普通用户将 2002 年的 Winamp3 播放器在现代 Linux 系统上成功运行，无需复杂的音频系统配置。
 
@@ -293,7 +293,8 @@ dpkg -l | grep osspd # → (空) ✅
 
 ```
 github-repo/
-├── README.md              # 本文档
+├── README.md              # 本文档（英文主版）
+├── README_zh.md           # 中文版（本文档）
 ├── AppRun                 # 应用启动器
 ├── oss-bridge/            # 桥接组件源码
 │   ├── shim_oss.c         # 32位 shim
