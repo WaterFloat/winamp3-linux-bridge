@@ -1,0 +1,40 @@
+# .gitignore for Winamp3 Linux Bridge
+
+# Build artifacts
+*.o
+*.so
+*.so.*
+oss_helper
+oss_shim.so
+test_helper_proto
+test_shim_open
+bridge_stress
+
+# AppImage
+*.AppImage
+*.AppImage.*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
+
+# Editor
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+oss_bridge.log
+wa3_stdout.log
+oss_helper.log
+
+# Instance lock files
+~/.local/share/Winamp3-instance.pid
+~/.local/share/Winamp3-instance.lock

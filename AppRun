@@ -1,0 +1,236 @@
+#!/bin/sh
+# AppRun — Winamp3 Linux alpha 1 (2002) AppImage launcher
+# Native 32-bit x86 ELF (X11 client + OSS output). This script:
+#   * bundles the compat libs via LD_LIBRARY_PATH
+#   * checks whether OSS audio is actually available and tells the user how to
+#     enable it (osspd + CUSE) instead of silently running mute
+#   * runs WA3 directly against /dev/dsp (raw OSS); we deliberately do NOT use
+#     the padsp/aoss bridge (see section 3 for why it is a dead end here)
+#   * reuses the host DISPLAY (X11 / XWayland)
+#   * prefers the bundled 32-bit ld-linux for clean startup on 64-bit hosts
+#
+# Tunables (environment variables):
+#   WINAMP_OSS=1        force raw OSS (this is now the default; kept only for
+#                       script/launch-compatibility, the bridge is gone)
+#   WINAMP_AUDIO_HINT=0 suppress the missing-audio notification entirely
+
+HERE="$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0")")"
+
+# 1) library search path: bundled compat libs first, then AppImage libs
+export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/libs:$HERE/extra_libs:${LD_LIBRARY_PATH}"
+
+# ---------------------------------------------------------------------------
+# 2) audio readiness check
+#
+# Winamp3 ships only of_oss.so: it open()s /dev/dsp and write()s PCM into it.
+# Modern kernels dropped OSS, so /dev/dsp does not exist and WA3 goes mute.
+# osspd recreates a real /dev/dsp node from userspace via the CUSE kernel
+# module. Neither of those can be shipped inside an AppImage (kernel modules
+# are kernel-version bound; device nodes need root), so the best we can do is
+# detect exactly which piece is missing and tell the user the one command that
+# fixes it. WA3 itself never aborts on a missing /dev/dsp — the GUI comes up
+# fine, just silent — so this is a visible-hint problem, not a startup problem.
+# ---------------------------------------------------------------------------
+wa3_notify() {
+    # $1 = title, $2 = body. Fire-and-forget; never blocks the launch.
+    if command -v zenity >/dev/null 2>&1; then
+        ( zenity --warning --no-wrap --title="$1" --text="$2" >/dev/null 2>&1 ) &
+    elif command -v kdialog >/dev/null 2>&1; then
+        ( kdialog --title "$1" --sorry "$2" >/dev/null 2>&1 ) &
+    elif command -v notify-send >/dev/null 2>&1; then
+        notify-send -i audio-card -t 20000 "$1" "$2" >/dev/null 2>&1 &
+    elif command -v xmessage >/dev/null 2>&1; then
+        ( xmessage -center -timeout 30 "$1
+
+$2" >/dev/null 2>&1 ) &
+    fi
+}
+
+wa3_audio_check() {
+    # A writable OSS node already exists -> audio works, stay quiet.
+    for _dsp in /dev/dsp /dev/dsp1 /dev/sound/dsp; do
+        [ -w "$_dsp" ] 2>/dev/null && return 0
+    done
+    [ "$WINAMP_AUDIO_HINT" = "0" ] && return 0
+
+    # --- probe the host ---
+    _cuse_loaded=0; _cuse_avail=0; _osspd_installed=0; _osspd_running=0
+
+    if grep -qw cuse /proc/modules 2>/dev/null || [ -d /sys/module/cuse ]; then
+        _cuse_loaded=1
+    fi
+    [ -n "$(find "/lib/modules/$(uname -r)" -name 'cuse.ko*' -print -quit 2>/dev/null)" ] && _cuse_avail=1
+    command -v osspd >/dev/null 2>&1 && _osspd_installed=1
+    if command -v dpkg >/dev/null 2>&1; then
+        dpkg -s osspd >/dev/null 2>&1 && _osspd_installed=1
+    elif command -v rpm >/dev/null 2>&1; then
+        rpm -q osspd >/dev/null 2>&1 && _osspd_installed=1
+    fi
+    pgrep -x osspd >/dev/null 2>&1 && _osspd_running=1
+
+    # --- compose a message that names exactly what is missing ---
+    _msg="Winamp3 已启动，但没有声音：系统缺少 OSS 设备 /dev/dsp。
+Winamp3 started without sound: /dev/dsp (OSS) is missing.
+
+原因：Winamp3 只带 of_oss.so 输出插件，只能往 /dev/dsp 写 PCM，
+而现代内核已移除 OSS，需要 osspd 用 CUSE 在用户态重建该设备。
+Note: Winamp3 only ships the OSS output plugin. Modern kernels have no
+OSS layer, so osspd + CUSE must recreate /dev/dsp in userspace.
+
+诊断 / diagnosis:"
+
+    if [ "$_osspd_installed" = 1 ]; then
+        _msg="$_msg
+  [OK] osspd 已安装 / installed"
+    else
+        _msg="$_msg
+  [缺失/missing] osspd 未安装 / not installed"
+    fi
+
+    if [ "$_cuse_loaded" = 1 ]; then
+        _msg="$_msg
+  [OK] cuse 模块已加载 / module loaded"
+    elif [ "$_cuse_avail" = 1 ]; then
+        _msg="$_msg
+  [未加载/not loaded] cuse 模块存在但未加载 / module present but not loaded"
+    else
+        _msg="$_msg
+  [缺失/missing] 当前内核无 cuse 模块 / no cuse module for kernel $(uname -r)"
+    fi
+
+    if [ "$_osspd_running" = 1 ]; then
+        _msg="$_msg
+  [OK] osspd 守护进程运行中 / daemon running"
+    fi
+
+    # --- the one command that fixes it (needs root, once per machine) ---
+    _fix=""
+    [ "$_osspd_installed" = 0 ] && _fix="${_fix}sudo apt install -y osspd && "
+    if [ "$_cuse_loaded" = 0 ] && [ "$_cuse_avail" = 1 ]; then
+        _fix="${_fix}sudo modprobe cuse && "
+    fi
+    _fix="${_fix}echo done"
+
+    # Distribution-agnostic wording: apt for Debian/Ubuntu/Deepin, else dnf/yum.
+    case "$(. /etc/os-release 2>/dev/null; echo "$ID")" in
+        fedora|rhel|centos|opensuse*)
+            _fix="sudo dnf install -y osspd && sudo modprobe cuse"
+            ;;
+    esac
+
+    _msg="$_msg
+
+修复方法（需 root，每台机器只需一次）/ Fix (needs root, once):
+  $_fix
+
+装完重新运行本 AppImage 即可出声。
+Then restart this AppImage to get sound.
+
+（图形界面与播放列表一切正常，仅输出无声。）
+(The GUI works normally — only audio output is silent.)"
+
+    # Always echo to the terminal; also pop a hint when a desktop is reachable.
+    printf '%s\n' "$_msg" >&2
+    if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
+        wa3_notify "Winamp3 — 无声音 / No audio device" "$_msg"
+    fi
+    return 0
+}
+
+# 3.5) self-contained OSS bridge (shim + helper) — ON by default for out-of-box
+#      audio. oss_shim.so (LD_PRELOADed into WA3) intercepts /dev/dsp and forwards
+#      to oss_helper (64-bit, host libpulse/PipeWire) -> sound WITHOUT osspd.
+#      Set WINAMP_BRIDGE=0 to disable and fall back to the raw-OSS/osspd path.
+if [ "${WINAMP_BRIDGE}" != "0" ] && [ -x "$HERE/oss-bridge/oss_helper" ] && [ -f "$HERE/oss-bridge/oss_shim.so" ]; then
+    export LD_PRELOAD="$HERE/oss-bridge/oss_shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
+    # Diagnostic trace: the helper timestamps every write/ioctl/underrun and the
+    # ALSA hw params. Override the path with OSS_BRIDGE_LOG=... ; set it to an
+    # empty string to switch logging off entirely.
+    OSS_BRIDGE_LOG="${OSS_BRIDGE_LOG-$HOME/oss_bridge.log}"
+    export OSS_BRIDGE_LOG
+    # helper is a 64-bit process; do NOT let it inherit the 32-bit shim in
+    # LD_PRELOAD (the 64-bit loader would just warn "wrong ELF class" and ignore).
+    LD_PRELOAD= "$HERE/oss-bridge/oss_helper" >/tmp/oss_helper.log 2>&1 &
+    OSS_HELPER_PID=$!
+    # readiness gate: wait until the helper's socket actually exists before
+    # launching WA3, so the shim's constructor-time connect always succeeds.
+    for _w in 1 2 3 4 5 6; do
+        [ -S /tmp/.oss_bridge.sock ] && break
+        sleep 0.5
+    done
+    trap 'kill "$OSS_HELPER_PID" 2>/dev/null' EXIT
+    echo "[AppRun] OSS bridge enabled (shim+helper); osspd not required." >&2
+    [ -n "$OSS_BRIDGE_LOG" ] && echo "[AppRun] audio trace log: $OSS_BRIDGE_LOG" >&2
+else
+    wa3_audio_check
+fi
+
+# 3) launch — direct OSS, always.
+#
+#    We deliberately do NOT use padsp/aoss as a bridge. Those tools wrap the
+#    binary with LD_PRELOAD=/usr/$LIB/pulseaudio/libpulsedsp.so, and the 32-bit
+#    variant of that preload lib does not exist on modern hosts (only the 64-bit
+#    one at /usr/lib/x86_64-linux-gnu/pulseaudio/libpulsedsp.so). A 32-bit WA3
+#    process cannot load it, and any shippable 32-bit libpulse would require
+#    GLIBC >= 2.3.4 — conflicting with the bundled glibc 2.3.2. So the only path
+#    that works is to let WA3 open /dev/dsp directly. When /dev/dsp is missing,
+#    WA3 simply runs silent and wa3_audio_check() above has already told the
+#    user the one command that fixes it (install osspd + load cuse).
+#
+#    WINAMP_OSS=1 is accepted for compatibility but is now identical to the
+#    default: raw OSS, no bridge.
+
+# 4) launch — direct OSS, always. Run in the background (NOT exec) so we can
+#    patch the window properties afterwards, then wait for WA3 to exit.
+#
+#    Winamp3's Wasabi UI creates its X11 windows WITHOUT setting WM_CLASS /
+#    _NET_WM_NAME / _NET_WM_PID. Deepin's dock (and most EWMH docks) need at
+#    least WM_CLASS to give a running window a taskbar slot, so without it the
+#    app appears on screen but gets NO taskbar entry. We inject WM_CLASS via
+#    xdotool (if present + DISPLAY set) a moment after launch. This needs
+#    xdotool on the host; without it the app still runs, just sans a slot.
+LD="$HERE/usr/lib/ld-linux.so.2"
+# Capture WA3's stdout/stderr to a file so a crash is diagnosable (the desktop
+# launcher otherwise discards it). Append so repeated launches accumulate.
+WA3_LOG="${WA3_LOG-$HOME/wa3_stdout.log}"
+if [ -x "$LD" ]; then
+    "$LD" --library-path "$LD_LIBRARY_PATH" "$HERE/Winamp.exe" "$@" >>"$WA3_LOG" 2>&1 &
+else
+    "$HERE/Winamp.exe" "$@" >>"$WA3_LOG" 2>&1 &
+fi
+WA3PID=$!
+echo "[AppRun] Winamp3 PID=$WA3PID, stdout/stderr -> $WA3_LOG" >&2
+# WA3 is now running with the shim preloaded; clear LD_PRELOAD for the later
+# host-side helper tools (xdotool etc.) so they don't inherit the 32-bit shim.
+unset LD_PRELOAD
+
+# 5) patch WM_CLASS onto WA3's anonymous windows so the taskbar can place them.
+#
+#    WA3's Wasabi UI creates SEVERAL toplevel X11 windows over time, ALL without
+#    WM_CLASS / _NET_WM_NAME / _NET_WM_PID. Deepin's dock needs WM_CLASS to give a
+#    running window a slot; windows with NO class each spawn a stray anonymous
+#    dock icon that overlaps the real one. So we must keep re-scanning (NO early
+#    break) until WA3 has finished creating its windows, and stamp WM_CLASS on
+#    every anonymous WA3 window so the dock groups them into a SINGLE entry.
+if [ -n "$DISPLAY" ] && command -v xdotool >/dev/null 2>&1; then
+    for _i in $(seq 1 25); do
+        sleep 1
+        for _W in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed "s/.*# //;s/,//g"); do
+            _P=$(xprop -id "$_W" _NET_WM_PID 2>/dev/null | sed "s/.*= //;s/[^0-9]//g")
+            _C=$(xprop -id "$_W" WM_CLASS 2>/dev/null)
+            # never touch the known system shells (they legitimately have no pid)
+            case "$_C" in
+                *dde-shell*|*dde-file-manager*|*deepin*) continue ;;
+            esac
+            if [ -z "$_P" ] && echo "$_C" | grep -q "not found"; then
+                xdotool set_window --classname Winamp3 --class Winamp3 \
+                    --name "Winamp3 (Linux)" "$_W" 2>/dev/null
+            fi
+        done
+    done
+fi
+
+wait "$WA3PID"
+_WA3_RC=$?
+echo "[AppRun] Winamp3 exited with status $_WA3_RC at $(date)" >>"$WA3_LOG"
+echo "[AppRun] Winamp3 exited with status $_WA3_RC at $(date)" >&2
